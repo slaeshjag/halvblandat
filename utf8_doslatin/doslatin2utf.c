@@ -12,7 +12,7 @@ unsigned char *char_lookup(const unsigned char *str) {
 
 	for (i = 0; replace_arr[i*2]; i++)
 		if (!strcmp(str, replace_arr[i * 2 + 1]))
-			return replace_arr[i * 2 + 1];
+			return replace_arr[i * 2];
 	if (*str < 0x7F)
 		return str;
 	return "?";
