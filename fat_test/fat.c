@@ -5,14 +5,26 @@
 #include <string.h>
 #include "fat.h"
 
-#define	READ_WORD(x, n)		((uint16_t) ((uint16_t) x[n] | (((uint16_t) x[(n) + 1]) << 8)))
-#define	READ_DWORD(x, n)	(((uint32_t) READ_WORD(x, n) | (((uint32_t) READ_WORD(x, (n) + 2)) << 16)))
+#define	MAX_FD_OPEN		4
+#define	READ_WORD(x, n)		((uint16_t) ((uint16_t) x[(n)] | (((uint16_t) x[(n) + 1]) << 8)))
+#define	READ_DWORD(x, n)	read_dword(x, n)
+#define	WRITE_WORD(x, n, w)	((x)[(n)] = (w & 0xFF), (x)[(n) + 1] = ((w) >> 8) & 0xFF)
+#define	WRITE_DWORD(x, n, dw)	(WRITE_WORD(x, n, dw & 0xFFFF), WRITE_WORD((x), (n) + 2, (dw) >> 16))
+#define GET_ENTRY_CLUSTER(e)	(READ_WORD(sector_buff, e * 32 + 20) << 16) | (READ_WORD(sector_buff, e * 32 + 26))
+
+uint32_t read_dword(uint8_t *buff, int byte) {
+	uint32_t dw;
+
+	dw = READ_WORD(buff, byte);
+	dw |= (READ_WORD(buff, byte + 2) << 16);
+	return dw;
+}
+
 uint32_t locate_record(const char *path, int *record_index);
 
 char sector_buff[512];
 
 enum FAT_TYPE {
-	FAT_TYPE_FAT12,
 	FAT_TYPE_FAT16,
 	FAT_TYPE_FAT32,
 };
@@ -29,10 +41,21 @@ struct {
 	enum FAT_TYPE	type;
 } fat_state;
 
+struct FATFileDescriptor {
+	int32_t		key;
+	uint32_t	entry_sector;
+	uint32_t	entry_index;
+	uint32_t	first_cluster;
+	uint32_t	current_cluster;
+	uint32_t	fpos;
+	uint32_t	file_size;
+	bool		write;
+};
+
+static struct FATFileDescriptor fat_fd[MAX_FD_OPEN];
+static int32_t fat_key = 0;
 
 static bool end_of_chain_mark(uint32_t cluster) {
-	if (fat_state.type == FAT_TYPE_FAT12)
-		return cluster >= 0xFF8 ? true : false;
 	if (fat_state.type == FAT_TYPE_FAT16)
 		return cluster >= 0xFFF8 ? true : false;
 	return cluster >= 0x0FFFFFF8 ? true : false;
@@ -70,8 +93,9 @@ int init_fat() {
 	}
 
 	if (fat_state.clusters < 4085) {
-		fat_state.type = FAT_TYPE_FAT12;
-		fprintf(stderr, "FAT12 detected\n");
+		fprintf(stderr, "FAT12 unsupported\n");
+		fprintf(stderr, "%i clusters\n", fat_state.clusters);
+		return -1;
 	} else if (fat_state.clusters < 65525) {
 		fat_state.type = FAT_TYPE_FAT16;
 		fprintf(stderr, "FAT16 detected\n");
@@ -100,6 +124,9 @@ int init_fat() {
 	if (fat_state.type == FAT_TYPE_FAT32)
 		fat_state.root_dir_pos = fat_state.fat_pos + fat_state.cluster_size * READ_DWORD(data, 44);
 	fat_state.data_region = fat_state.root_dir_pos + READ_WORD(data, 17) * 32 / 512;
+
+	for (i = 0; i < MAX_FD_OPEN; i++)
+		fat_fd[i].key = -1;
 	fat_state.valid = true;
 
 	tu32 = locate_record("/ARNE/HEJ.TXT", &i);
@@ -130,64 +157,51 @@ void fname_to_fatname(char *name, char *fname) {
 }
 
 
+uint32_t cluster_to_sector(uint32_t cluster) {
+	if (!cluster)
+		return 0;
+	return (cluster - 2) * fat_state.cluster_size + fat_state.data_region;
+}
+
+uint32_t sector_to_cluster(uint32_t sector) {
+	if (!sector)
+		return 0;
+	return (sector - fat_state.data_region) / fat_state.cluster_size + 2;
+}
+
+
 uint32_t next_cluster(uint32_t prev_cluster) {
 	uint32_t cluster_pos, ut32, cluster_sec;
 	int i;
 
-	if (fat_state.type == FAT_TYPE_FAT12) {
-		ut32 = 0;
-		cluster_pos = prev_cluster / 2 * 3;
-		cluster_sec = cluster_pos >> 9;
-		cluster_pos &= 0x1FF;
-		if (read_sector(cluster_sec, sector_buff) < 0) {
-			fat_state.valid = false;
-			return 0;
-		}
-
-		if (cluster_sec + 3 >= 512) {
-			for (i = 0; cluster_pos + i < 512; i++)
-				ut32 |= sector_buff[cluster_pos] << (i << 3);
-			if (read_sector(cluster_sec + 1, sector_buff) < 0) {
-				fat_state.valid = false;
-				return 0;
-			}
-		} else
-			i = 0;
-		for (; i < 3; i++)
-			ut32 |= sector_buff[cluster_pos] << (i << 3);
-		if (prev_cluster & 1)
-			cluster_sec = ut32 >> 12;
-		else
-			cluster_sec = ut32 & 0xFFF;
-		if (cluster_sec >= 0xFF7)
-			return 0;
-	} else if (fat_state.type == FAT_TYPE_FAT16) {
+	if (fat_state.type == FAT_TYPE_FAT16) {
 		cluster_pos = prev_cluster << 1;
 		cluster_sec = cluster_pos >> 9;
 		cluster_pos &= 0x1FF;
+		cluster_sec += fat_state.fat_pos;
 		if (read_sector(cluster_sec, sector_buff) < 0) {
 			fat_state.valid = false;
 			return 0;
 		}
 			
 		cluster_sec = READ_WORD(sector_buff, cluster_pos);
-		if (cluster_sec >= 0xFFF7)
-			return 0;
 	} else {
 		cluster_pos = prev_cluster << 2;
 		cluster_sec = cluster_pos >> 9;
 		cluster_pos &= 0x1FF;
+		cluster_sec += fat_state.fat_pos;
 		if (read_sector(cluster_sec, sector_buff) < 0) {
 			fat_state.valid = false;
 			return 0;
 		}
 
 		cluster_sec = READ_DWORD(sector_buff, cluster_pos) & 0x0FFFFFFF;
-		if (cluster_sec >= 0x0FFFFFF7)
-			return 0;
 	}
 
-	return (cluster_sec - 2) * fat_state.cluster_size + (fat_state.fat_pos + (fat_state.fat_size << 2));
+	if (end_of_chain_mark(cluster_sec))
+		return 0;
+
+	return cluster_sec;
 }
 
 
@@ -195,7 +209,7 @@ uint32_t locate_record(const char *path, int *record_index) {
 	char component[13], fatname[11];
 	int i;
 	uint32_t cur_sector;
-	bool recurse = false;
+	bool recurse = false, file = false;
 
 	cur_sector = fat_state.root_dir_pos;
 
@@ -210,10 +224,8 @@ uint32_t locate_record(const char *path, int *record_index) {
 			return cur_sector;
 		}
 	} else if (recurse) {
-		cur_sector = (READ_WORD(sector_buff, i * 32 + 20) << 16) | (READ_WORD(sector_buff, i * 32 + 26));
-		cur_sector -= 2;
-		cur_sector *= fat_state.cluster_size;
-		cur_sector += fat_state.data_region;
+		cur_sector = GET_ENTRY_CLUSTER(i);
+		cur_sector = cluster_to_sector(cur_sector);
 	}
 	strncpy(component, path, 13);
 	for (i = 0; *path && *path != '/'; i++)
@@ -222,6 +234,8 @@ uint32_t locate_record(const char *path, int *record_index) {
 		path++;
 	if (i < 13)
 		component[i] = 0;
+	if (file && *path)	/* A non-directory mid-path */
+		return 0;
 	fname_to_fatname(component, fatname);
 	for (;;) {
 		if (read_sector(cur_sector, sector_buff) < 0) {
@@ -241,26 +255,188 @@ uint32_t locate_record(const char *path, int *record_index) {
 
 			if (!memcmp(fatname, &sector_buff[i * 32], 11)) {
 				recurse = true;
-				if (sector_buff[i * 32 + 11] & 0x10) {
-					/* It's a directory.. */
-				}
+				file = (sector_buff[i * 32 + 11] & 0x10) ? false : true;
 				goto found_component;
 			}
 		}
 
 		if (cur_sector / fat_state.cluster_size != (cur_sector + 1) / fat_state.cluster_size) {
-			cur_sector = next_cluster((cur_sector - fat_state.data_region) / fat_state.cluster_size + 2);
+			cur_sector = cluster_to_sector(next_cluster(sector_to_cluster(cur_sector)));
 			if (!cur_sector)
 				return 0;
-			cur_sector -= 2;
-			cur_sector *= fat_state.cluster_size;
-			cur_sector += fat_state.data_region;
 		} else
 			cur_sector++;
 	}
-		
-		
 }
+
+
+uint32_t alloc_cluster(uint32_t entry_sector, uint32_t entry_index, uint32_t old_cluster) {
+	int i, j;
+	uint32_t cluster;
+
+	for (i = 0; i < fat_state.fat_size; i++) {
+		if (!read_sector(fat_state.fat_pos + i, sector_buff)) {
+			fat_state.valid = false;
+			return 0;
+		}
+
+		if (fat_state.type == FAT_TYPE_FAT16) {
+			for (j = 0; j < 512; j+=2)
+				if (!READ_WORD(sector_buff, j)) {
+					cluster = i * 256 + j/2;
+					WRITE_WORD(sector_buff, j, 0xFFFF);
+					write_sector(fat_state.fat_pos + i, sector_buff);
+					write_sector(fat_state.fat_pos + fat_state.fat_size + i, sector_buff);
+					if (old_cluster) {
+						read_sector(fat_state.fat_pos + old_cluster / 256);
+						WRITE_WORD(sector_buff, (old_cluster & 0xFF) << 1, cluster);
+						write_sector(fat_state.fat_pos + i, sector_buff);
+						if (write_sector(fat_state.fat_pos + fat_state.fat_size + i, sector_buff) < 0) {
+							fat_state.valid = false;
+							return 0;
+						}
+					}
+
+					break;
+				}
+		} else {
+			for (j = 0; j < 512; j += 4)
+				if (!READ_DWORD(sector_buff, j)) {
+					cluster = i * 128 + j / 4;
+					WRITE_DWORD(sector_buff, j, 0x0FFFFFFF);
+					write_sector(fat_state.fat_pos + i, sector_buff);
+					write_sector(fat_state.fat_pos + fat_state.fat_size + i, sector_buff);
+					if (old_cluster) {
+						read_sector(fat_state.fat_pos + old_cluster / 128);
+						WRITE_DWORD(sector_buff, (old_cluster & 0x7F) << 2, cluster);
+						write_sector(fat_state.fat_pos + i, sector_buff);
+						if (write_sector(fat_state.fat_pos + fat_state.fat_size + i, sector_buff) < 0) {
+							fat_state.valid = false;
+							return 0;
+						}
+					}
+
+					break;
+				}
+		}
+	}
+
+	if (!old_cluster) {
+		read_sector(entry_sector, sector_buff);
+		WRITE_WORD(sector_buff, entry_index * 32 + 20, cluster >> 16);
+		WRITE_WORD(sector_buff, entry_index * 32 + 26, cluster);
+		write_sector(entry_sector, sector_buff);
+	}
+
+	return cluster;
+}
+
+
+int fat_open(const char *path, int flags) {
+	int key, i, index;
+	uint32_t sector;
+
+	if (!fat_state.valid)
+		return -1;
+
+	for (i = 0; i < MAX_FD_OPEN; i++)
+		if (fat_fd[i].key < 0)
+			break;
+	if (i == MAX_FD_OPEN)
+		return -1;
+	
+	if (!(sector = locate_record(path, &index)))
+		return -1;
+	if (read_sector(sector, sector_buff) < 0) {
+		fat_state.valid = false;
+		return -1;
+	}
+
+	if (sector_buff[index * 32 + 11] & 0x10)
+		/* Don't allow opening a directory */
+		return -1;
+	fat_fd[i].write = flags&O_WRONLY?true:false;
+	fat_fd[i].entry_sector = sector;
+	fat_fd[i].entry_index = index;
+	fat_fd[i].first_cluster = GET_ENTRY_CLUSTER(index);
+	if (fat_fd[i].first_cluster == 0) {
+		if (fat_fd[i].write)
+			fat_fd[i].first_cluster = alloc_cluster(fat_fd[i].entry_sector, fat_fd[i].entry_index, 0);
+		fat_fd[i].file_size = 0;
+	} else {
+		fat_fd[i].file_size = read_dword(sector_buff, index * 32 + 28);
+	}
+
+	fat_fd[i].current_cluster = fat_fd[i].first_cluster;
+	fat_fd[i].fpos = 0;
+	fat_fd[i].key = fat_key++;
+	return fat_fd[i].key;
+}
+
+
+uint32_t fat_fsize(int fd) {
+	int i;
+	
+	if (fd < 0)
+		return 0;
+	for (i = 0; i < MAX_FD_OPEN; i++)
+		if (fat_fd[i].key == fd)
+			break;
+	if (i == MAX_FD_OPEN)
+		return 0;
+	return fat_fd[i].file_size;
+}
+
+
+uint32_t fat_ftell(int fd) {
+	int i;
+
+	if (fd < 0)
+		return 0;
+	for (i = 0; i < MAX_FD_OPEN; i++)
+		if (fat_fd[i].key == fd)
+			break;
+	if (i == MAX_FD_OPEN)
+		return 0;
+	return fat_fd[i].fpos;
+}
+
+
+bool fat_read_sect(int fd) {
+	int i;
+	uint32_t old_cluster, sector;
+	
+	if (fd < 0)
+		return false;
+	for (i = 0; i < MAX_FD_OPEN; i++)
+		if (fat_fd[i].key == fd)
+			break;
+	if (i == MAX_FD_OPEN)
+		return false;
+	if (!fat_fd[i].current_cluster)
+		return false;
+	if (fat_fd[i].fpos == fat_fd[i].file_size)
+		return false;
+	sector = cluster_to_sector(fat_fd[i].current_cluster) + ((fat_fd[i].fpos >> 9) % fat_state.cluster_size);
+	
+	fat_fd[i].fpos += 512;
+	if (fat_fd[i].file_size < fat_fd[i].fpos)
+		fat_fd[i].fpos = fat_fd[i].file_size & (~0x1FF);
+	if (!(fat_fd[i].fpos % (fat_state.cluster_size * 512))) {
+		old_cluster = fat_fd[i].current_cluster;
+		fat_fd[i].current_cluster = next_cluster(fat_fd[i].current_cluster);
+		if (!fat_fd[i].current_cluster && fat_fd[i].write)
+			fat_fd[i].current_cluster = alloc_cluster(fat_fd[i].entry_sector, fat_fd[i].entry_index, old_cluster);
+	}
+	
+	if (read_sector(sector, sector_buff) < 0) {
+		fat_state.valid = false;
+		return false;
+	}
+
+	return true;
+}
+
 
 #if 0
 	if ((err = read_sector(fat_state.root_dir_pos, data) < 0)) {
