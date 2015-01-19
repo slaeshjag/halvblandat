@@ -43,5 +43,13 @@ int main(int argc, char **argv) {
 	sector_buff[size & 0x1FF] = 0;
 	fprintf(stderr, "Contents of last sector in file:\n%s", sector_buff);
 
+	fd = fat_open("/TEST.BIN", O_RDWR);
+	size = fat_fsize(fd);
+	fprintf(stderr, "fd=%i, size=%i\n", fd, size);
+	for (i = 0; i < 129; i++) {
+		memset(sector_buff, i, 512);
+		fat_write_sect(fd);
+	}
+
 	return 0;
 }

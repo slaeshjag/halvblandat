@@ -129,8 +129,6 @@ int init_fat() {
 		fat_fd[i].key = -1;
 	fat_state.valid = true;
 
-	tu32 = locate_record("/ARNE/HEJ.TXT", &i);
-	fprintf(stderr, "Record for /ARNE/HEJ.TXT: %u:%i\n", tu32, i);
 	return 0;
 }
 
@@ -247,8 +245,8 @@ uint32_t locate_record(const char *path, int *record_index) {
 			if ((sector_buff[i * 32 + 11] & 0xF) == 0xF)	/* Long filename entry */
 				continue;
 			if (!sector_buff[i * 32 + 11]) {
-				if (!*sector_buff)	/* End of list */
-					break;
+				if (!sector_buff[i * 32])	/* End of list */
+					return 0;
 				/* Deleted record, skip */
 				continue;
 			}
@@ -275,7 +273,7 @@ uint32_t alloc_cluster(uint32_t entry_sector, uint32_t entry_index, uint32_t old
 	uint32_t cluster;
 
 	for (i = 0; i < fat_state.fat_size; i++) {
-		if (!read_sector(fat_state.fat_pos + i, sector_buff)) {
+		if (read_sector(fat_state.fat_pos + i, sector_buff) < 0) {
 			fat_state.valid = false;
 			return 0;
 		}
@@ -297,7 +295,7 @@ uint32_t alloc_cluster(uint32_t entry_sector, uint32_t entry_index, uint32_t old
 						}
 					}
 
-					break;
+					goto allocated;
 				}
 		} else {
 			for (j = 0; j < 512; j += 4)
@@ -316,11 +314,12 @@ uint32_t alloc_cluster(uint32_t entry_sector, uint32_t entry_index, uint32_t old
 						}
 					}
 
-					break;
+					goto allocated;
 				}
 		}
 	}
-
+	
+	allocated:
 	if (!old_cluster) {
 		read_sector(entry_sector, sector_buff);
 		WRITE_WORD(sector_buff, entry_index * 32 + 20, cluster >> 16);
@@ -435,6 +434,38 @@ bool fat_read_sect(int fd) {
 	}
 
 	return true;
+}
+
+
+bool fat_write_sect(int fd) {
+	int i;
+	uint32_t old_cluster, sector;
+
+	if (fd < 0)
+		return false;
+	for (i = 0; i < MAX_FD_OPEN; i++)
+		if (fat_fd[i].key == fd)
+			break;
+	if (i == MAX_FD_OPEN)
+		return false;
+	if (!fat_fd[i].write)
+		return false;
+	if (!fat_fd[i].current_cluster)
+		return false;
+	sector = cluster_to_sector(fat_fd[i].current_cluster);
+	sector += (fat_fd[i].fpos >> 9) % fat_state.cluster_size;
+	write_sector(sector, sector_buff);
+	fat_fd[i].fpos += 512;
+	if (!((fat_fd[i].fpos >> 9) % fat_state.cluster_size)) {
+		old_cluster = fat_fd[i].current_cluster;
+		fat_fd[i].current_cluster = next_cluster(fat_fd[i].current_cluster);
+		if (!fat_fd[i].current_cluster && fat_fd[i].write)
+			fat_fd[i].current_cluster = alloc_cluster(fat_fd[i].entry_sector, fat_fd[i].entry_index, old_cluster);
+	}
+
+	read_sector(fat_fd[i].entry_sector, sector_buff);
+	WRITE_DWORD(sector_buff, fat_fd[i].entry_index * 32 + 28, fat_fd[i].fpos);
+	write_sector(fat_fd[i].entry_sector, sector_buff);
 }
 
 
