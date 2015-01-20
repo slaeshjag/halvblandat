@@ -1,8 +1,6 @@
 #include <stdio.h>
-#include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
-#include <string.h>
 #include "fat.h"
 
 #define	MAX_FD_OPEN		4
@@ -12,7 +10,7 @@
 #define	WRITE_DWORD(x, n, dw)	write_dword(x, n, dw)
 #define GET_ENTRY_CLUSTER(e)	(READ_WORD(sector_buff, e * 32 + 20) << 16) | (READ_WORD(sector_buff, e * 32 + 26))
 
-uint32_t read_dword(uint8_t *buff, int byte) {
+static uint32_t read_dword(uint8_t *buff, int byte) {
 	uint32_t dw;
 
 	dw = READ_WORD(buff, byte);
@@ -20,7 +18,7 @@ uint32_t read_dword(uint8_t *buff, int byte) {
 	return dw;
 }
 
-void write_dword(uint8_t *buff, int byte, uint32_t dw) {
+static void write_dword(uint8_t *buff, int byte, uint32_t dw) {
 	WRITE_WORD(buff, byte, dw & 0xFFFF);
 	WRITE_WORD(buff, byte + 2, dw >> 16);
 }
@@ -29,7 +27,7 @@ static uint32_t locate_record(const char *path, int *record_index);
 
 uint8_t sector_buff[512];
 
-enum FAT_TYPE {
+enum FATType {
 	FAT_TYPE_FAT16,
 	FAT_TYPE_FAT32,
 };
@@ -44,7 +42,7 @@ struct {
 	uint32_t	fat_pos;
 	uint32_t	root_dir_pos;
 	uint32_t	data_region;
-	enum FAT_TYPE	type;
+	enum FATType	type;
 } fat_state;
 
 struct FATFileDescriptor {
@@ -840,8 +838,6 @@ int fat_dirlist(const char *path, struct FATDirList *list, int size, int skip) {
 					continue;
 				if (!sector_buff[j * 32 + 11] && !sector_buff[j * 32])
 					return found;
-				if (sector_buff[j * 32] == '.')
-					continue;
 				if (skip) {
 					skip--;
 					continue;
@@ -880,4 +876,9 @@ int fat_dirlist(const char *path, struct FATDirList *list, int size, int skip) {
 			sector = cluster_to_sector(cluster);	
 		}
 	}
+}
+
+
+bool fat_valid() {
+	return fat_state.valid;
 }
