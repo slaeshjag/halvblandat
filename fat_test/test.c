@@ -34,6 +34,8 @@ int main(int argc, char **argv) {
 	fp = fopen(argv[1], "r+");
 	init_fat();
 
+	delete_file("/ARNE/LOLOL.ASD");
+	delete_file("/ARNE");
 	create_file(0, "TESTCASE", 0x10);
 	create_file("/TESTCASE", "ARNE", 0x10);
 	create_file("/TESTCASE/ARNE", "TEST.BIN", 0x0);
@@ -50,6 +52,8 @@ int main(int argc, char **argv) {
 	delete_file("/TESTCASE/ARNE/TEST.BIN");
 	delete_file("/TESTCASE/ARNE");
 	delete_file("/TESTCASE");
+	create_file(0, "ARNE", 0x10);
+	create_file("/ARNE", "LOLOL.ASD", 0x10);
 
 	return 0;
 }
