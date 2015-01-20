@@ -8,4 +8,10 @@ int init_fat();
 #define	O_RDWR			(O_RDONLY | O_WRONLY)
 extern uint8_t sector_buff[512];
 
+struct FATDirList {
+	char		filename[13];
+	uint8_t		attrib;
+	uint8_t		padding[2];
+} __attribute__((packed));
+
 #endif

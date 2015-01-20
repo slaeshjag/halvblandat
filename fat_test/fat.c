@@ -786,34 +786,98 @@ void fat_set_stat(const char *path, uint8_t stat) {
 	sector_buff[(index << 5) + 11] = stat;
 	write_sector(sector, sector_buff);
 	return;
-	
 }
 
 
-#if 0
-	if ((err = read_sector(fat_state.root_dir_pos, data) < 0)) {
-		fprintf(stderr, "Unable to read root directory\n");
-		fat_state.valid = false;
-		return err;
+void fat_set_fsize(const char *path, uint32_t size) {
+	uint32_t sector;
+	int index;
+	if (!(sector = locate_record(path, &index)))
+		return;
+	read_sector(sector, sector_buff);
+	sector_buff[(index << 5) + 28] = size;
+	write_sector(sector, sector_buff);
+	return;
+}
+
+
+int fat_dirlist(const char *path, struct FATDirList *list, int size, int skip) {
+	uint32_t sector, cluster, found;
+	int index, i, j, k, l;
+	bool root = false;
+
+	if (!path);
+	else {
+		while (*path == '/') path++;
+		if (!*path)
+			path = 0;
 	}
-	
-	for (j = 0; j < 16; j++) {
-		if ((data[j*32 + 11] & 0x8))
-			continue;
-		if (!data[j*32 + 11])
-			break;
-		fprintf(stderr, "File name: ");
-		for (i = 0; i < 11; i++)
-			fprintf(stderr, "%c", data[j*32 + i]);
-		fprintf(stderr, "\n");
-		if (!(data[j*32 + 11] & 0x10))
-			fprintf(stderr, "This is not a directory\n");
-		fprintf(stderr, "Creation date: %i-%i-%i\n", (READ_WORD(data, j*32 + 16) >> 9) + 1980, (READ_WORD(data, j * 32 + 16) >> 5) & 0xF, (READ_WORD(data, j * 32 + 16) & 0x1F));
-		tu32 = (READ_WORD(data, j * 32 + 20) << 16) | (READ_WORD(data, j * 32 + 26));
-		fprintf(stderr, "Data cluster: 0x%X\n", tu32);
+	if (!path) {
+		sector = fat_state.root_dir_pos;
+		root = true;
+	} else {
+		if (!(sector = locate_record(path, &index)))
+			return -1;
+		read_sector(sector, sector_buff);
+		if (!(sector_buff[index * 32 + 11] & 0x10))
+			return -1;
+		cluster = GET_ENTRY_CLUSTER(index);
+		sector = cluster_to_sector(cluster);
 	}
 
-	fprintf(stderr, "End of directory\n");
-	fname_to_fatname
+	found = 0;
+	for (;;) {
+		cluster = sector_to_cluster(sector);
+		for (i = 0; i < fat_state.cluster_size; i++) {
+			if ((read_sector(sector + i, sector_buff)) < 0)
+				return 0;
+			for (j = 0; j < 16; j++) {
+				if (found >= size)
+					return found;
+				if (sector_buff[j * 32 + 11] == 0xF)
+					continue;
+				if (!sector_buff[j * 32 + 11] && sector_buff[j * 32] == 0xE5)
+					continue;
+				if (!sector_buff[j * 32 + 11] && !sector_buff[j * 32])
+					return found;
+				if (sector_buff[j * 32] == '.')
+					continue;
+				if (skip) {
+					skip--;
+					continue;
+				}
+
+				for (k = 0; k < 8; k++) {
+					if (sector_buff[j * 32 + k] == ' ')
+						break;
+					list[found].filename[k] = sector_buff[j * 32 + k];
+				}
+				
+				if (sector_buff[j * 32 + 8] != ' ') {
+					list[found].filename[k] = '.';
+					k++;
+				}
+
+				for (l = 0; l < 3; k++, l++) {
+					if (sector_buff[j * 32 + 8 + l] == ' ')
+						break;
+					list[found].filename[k] = sector_buff[j * 32 + 8 + l];
+				}
+				
+				list[found].filename[k] = 0;
+
+				list[found].attrib = sector_buff[j * 32 + 11];
+				found++;
+			}
+			
+		}
+		
+		if (root && fat_state.type == FAT_TYPE_FAT16) {
+			sector += fat_state.cluster_size;
+		} else {
+			if (!(cluster = next_cluster(cluster)))
+				return found;
+			sector = cluster_to_sector(cluster);	
+		}
+	}
 }
-#endif

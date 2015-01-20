@@ -30,6 +30,7 @@ int read_sector_call(int sector, uint8_t *data) {
 
 int main(int argc, char **argv) {
 	int fd, size, i;
+	struct FATDirList list[8];
 	
 	fp = fopen(argv[1], "r+");
 	init_fat();
@@ -49,11 +50,20 @@ int main(int argc, char **argv) {
 	}
 
 	fat_close(fd);
+
+	create_file(0, "ARNE", 0x10);
+	create_file("/ARNE", "LOLOL.ASD", 0x10);
+	
+	fprintf(stderr, "DIRLIST\n");
+	i = fat_dirlist("/TESTCASE/ARNE", list, 8, 0);
+	i--;
+	for (; i >= 0; i--) {
+		fprintf(stderr, "Found %s (0x%X)\n", list[i].filename, list[i].attrib);
+	}
+	
 	delete_file("/TESTCASE/ARNE/TEST.BIN");
 	delete_file("/TESTCASE/ARNE");
 	delete_file("/TESTCASE");
-	create_file(0, "ARNE", 0x10);
-	create_file("/ARNE", "LOLOL.ASD", 0x10);
 
 	return 0;
 }
