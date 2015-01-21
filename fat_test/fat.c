@@ -108,6 +108,7 @@ int init_fat() {
 	uint8_t *u8;
 	uint8_t tu8;
 	int err, i;
+	uint32_t fsinfo;
 
 	if ((err = read_sector(0, data) < 0))
 		return err;
@@ -161,7 +162,16 @@ int init_fat() {
 	if (fat_state.type == FAT_TYPE_FAT32) {
 		fat_state.data_region = fat_state.root_dir_pos;
 		fat_state.root_dir_pos = fat_state.fat_pos + fat_state.fat_size * 2 + fat_state.cluster_size * (READ_DWORD(data, 44) - 2);
+
+		/* Invalidate free space counter */
+		fsinfo = READ_WORD(data, 48);
+		read_sector(fsinfo, data);
+		if (READ_DWORD(data, 0) == 0x416145252 && READ_WORD(data, 510) == 0xAA55) {
+			WRITE_DWORD(data, 488, 0xFFFFFFFF);
+			write_sector(fsinfo, data);
+		}
 	}
+
 
 	for (i = 0; i < MAX_FD_OPEN; i++)
 		fat_fd[i].key = -1;
