@@ -723,6 +723,8 @@ bool delete_file(const char *path) {
 bool create_file(char *path, char *name, uint8_t attrib) {
 	uint32_t sector, pcluster, cluster;
 	int index, pindex, i;
+	if (*path == '/' && !*path)
+		path = NULL;
 	if (!path) {
 		sector = alloc_entry_root(&index);
 		pcluster = 0;
